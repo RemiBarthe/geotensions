@@ -43,12 +43,22 @@ function MapProvider({ children }: PropsWithChildren) {
       setZoom(map.getZoom())
     }
 
+    // Debounced sync during movement: starts tile fetching before the pan settles,
+    // so data arrives by the time the user stops. Minimap has its own direct move listener.
+    let debounceTimer: ReturnType<typeof setTimeout>
+    const syncDebounced = () => {
+      clearTimeout(debounceTimer)
+      debounceTimer = setTimeout(sync, 100)
+    }
+
     map.once('load', sync)
+    map.on('move', syncDebounced)
     map.on('moveend', sync)
 
     return () => {
-      map.off('load', sync)
+      map.off('move', syncDebounced)
       map.off('moveend', sync)
+      clearTimeout(debounceTimer)
     }
   }, [map])
 

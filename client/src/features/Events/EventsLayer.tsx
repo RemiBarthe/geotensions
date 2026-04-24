@@ -2,10 +2,10 @@ import { Layer, Source } from 'react-map-gl/maplibre'
 
 import { MAP_CONFIG } from '@/config/map'
 
-import { useEvents } from './useEvents'
+import { useTileEvents } from './useTileEvents'
 
 function EventsLayer() {
-  const { data: events, isFetching } = useEvents()
+  const { data: events, isFetching } = useTileEvents()
 
   return (
     <>
