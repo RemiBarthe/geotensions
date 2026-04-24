@@ -1,18 +1,17 @@
 import type { BBox } from '@/types/event'
 
-export const OVERVIEW_TILE_SIZE = 20 // degrees (≈ viewport at zoom 4-5)
-export const DETAIL_TILE_SIZE = 2    // degrees (≈ viewport at zoom 11-12)
+// Zoom bands determine tile granularity and request strategy
+export const WORLD_ZOOM_THRESHOLD = 4   // ≤ 4 : world overview (few large tiles)
+export const WORLD_TILE_SIZE = 90       // ~4–8 tiles for a world-scale viewport
+export const OVERVIEW_TILE_SIZE = 20    // ~4–12 tiles for a country-scale viewport
+export const DETAIL_TILE_SIZE = 2       // ~4–9 tiles for a city-scale viewport
 
 export interface TileCoord {
   x: number
   y: number
 }
 
-export function tileSize(isDetailed: boolean): number {
-  return isDetailed ? DETAIL_TILE_SIZE : OVERVIEW_TILE_SIZE
-}
-
-/** Tile coords covering bbox, extended by `buffer` tiles on each side for prefetch */
+/** Tile coords covering bbox, extended by `buffer` tiles on each side */
 export function bboxToTiles(bbox: BBox, size: number, buffer = 1): TileCoord[] {
   const [west, south, east, north] = bbox
   const tiles: TileCoord[] = []

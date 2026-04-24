@@ -1,5 +1,5 @@
 import { format } from 'date-fns'
-import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 
 import { getEvents } from '@/api/events'
 import { MAP_CONFIG } from '@/config/map'
@@ -9,14 +9,60 @@ import { normalizeBbox } from '@/features/Map/normalizeBbox'
 import type { EventCollection, EventFeature } from '@/types/event'
 
 import { readTile, writeTile } from './tileStore'
-import { bboxToTiles, makeTileKey, tileToBbox, tileSize } from './tileUtils'
+import {
+  bboxToTiles,
+  DETAIL_TILE_SIZE,
+  makeTileKey,
+  OVERVIEW_TILE_SIZE,
+  tileToBbox,
+  WORLD_TILE_SIZE,
+  WORLD_ZOOM_THRESHOLD,
+} from './tileUtils'
 
-// Module-level: persists within the tab session, shared across re-renders
+// ── Module-level state ────────────────────────────────────────────────────────
+// Persists within the tab session and survives React re-renders.
+
+// Tile data by tile key (used to check what's loaded and to clear on filter change)
 const overviewTiles = new Map<string, EventFeature[]>()
 const detailTiles = new Map<string, EventFeature[]>()
+
+// Incrementally maintained dedup maps — avoids O(n × tiles) merge on every render.
+// Rebuilt from scratch only on filter change.
+const overviewById = new Map<string, EventFeature>()
+const detailById = new Map<string, EventFeature>()
+
+// Fetch coordination
 const inFlight = new Set<string>()
-// Incremented on filter change to invalidate in-flight callbacks from the previous session
 let tileSession = 0
+
+// Caps concurrent API requests so the server isn't overwhelmed at world zoom.
+function createSemaphore(max: number) {
+  let current = 0
+  const queue: Array<() => void> = []
+
+  return {
+    acquire(): Promise<() => void> {
+      return new Promise((resolve) => {
+        const tryRun = () => {
+          if (current < max) {
+            current++
+            resolve(() => {
+              current--
+              if (queue.length > 0) queue.shift()!()
+            })
+          } else {
+            queue.push(tryRun)
+          }
+        }
+        tryRun()
+      })
+    },
+  }
+}
+
+const semaphore = createSemaphore(4)
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function hashFilters(dateFrom: Date, dateTo: Date, types: string[]): string {
   return [
@@ -26,13 +72,7 @@ function hashFilters(dateFrom: Date, dateTo: Date, types: string[]): string {
   ].join('|')
 }
 
-function mergeFeatures(memory: Map<string, EventFeature[]>): EventCollection {
-  const byId = new Map<string, EventFeature>()
-  for (const features of memory.values()) {
-    for (const f of features) byId.set(f.id, f)
-  }
-  return { type: 'FeatureCollection', features: [...byId.values()], is_truncated: false }
-}
+// ── Hook ──────────────────────────────────────────────────────────────────────
 
 export function useTileEvents() {
   const { bounds, zoom } = useMap()
@@ -41,18 +81,32 @@ export function useTileEvents() {
   const [isFetching, setIsFetching] = useState(false)
   const prevFiltersHashRef = useRef<string | null>(null)
 
+  // Coalesce rapid tile arrivals (parallel fetches) into a single re-render per 80ms
+  const batchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const batchedBump = useCallback(() => {
+    if (batchTimerRef.current) return
+    batchTimerRef.current = setTimeout(() => {
+      batchTimerRef.current = null
+      bumpVersion()
+    }, 80)
+  }, [])
+
   const isDetailed = zoom !== null && zoom > MAP_CONFIG.DETAIL_ZOOM_THRESHOLD
+  const isWorld = zoom !== null && zoom <= WORLD_ZOOM_THRESHOLD
 
   const filtersHash = useMemo(
     () => hashFilters(dateRange.from, dateRange.to, types),
-    [dateRange.from, dateRange.to, types]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [dateRange.from.getTime(), dateRange.to.getTime(), types.join(',')]
   )
 
-  // Clear in-memory tile caches when filters change so stale data never leaks
+  // On filter change: clear all in-memory caches and invalidate in-flight callbacks
   useEffect(() => {
     if (prevFiltersHashRef.current !== null && prevFiltersHashRef.current !== filtersHash) {
       overviewTiles.clear()
       detailTiles.clear()
+      overviewById.clear()
+      detailById.clear()
       tileSession++
       setIsFetching(false)
       bumpVersion()
@@ -60,15 +114,21 @@ export function useTileEvents() {
     prevFiltersHashRef.current = filtersHash
   }, [filtersHash])
 
-  // Load tiles for the current viewport + 1-tile prefetch buffer
+  // Load tiles covering the current viewport
   useEffect(() => {
     if (!bounds || zoom === null) return
 
     const memory = isDetailed ? detailTiles : overviewTiles
+    const byId = isDetailed ? detailById : overviewById
     const band = isDetailed ? 'detail' : 'overview'
-    const size = tileSize(isDetailed)
+
+    // Tile parameters per zoom band
+    const size = isDetailed ? DETAIL_TILE_SIZE : isWorld ? WORLD_TILE_SIZE : OVERVIEW_TILE_SIZE
+    const buffer = isWorld ? 0 : 1 // no prefetch buffer at world zoom (too many tiles)
+    const limit = isDetailed ? 5_000 : isWorld ? 5_000 : 20_000
+
     const bbox = normalizeBbox(bounds)
-    const needed = bboxToTiles(bbox, size, 1)
+    const needed = bboxToTiles(bbox, size, buffer)
 
     const missing = needed.filter(({ x, y }) => {
       const key = makeTileKey(band, filtersHash, x, y)
@@ -87,6 +147,7 @@ export function useTileEvents() {
       inFlight.add(key)
 
       void (async () => {
+        const release = await semaphore.acquire()
         try {
           let features = await readTile(key)
 
@@ -95,7 +156,7 @@ export function useTileEvents() {
               bbox: tileBbox,
               filters: { dateRange, types },
               fields: isDetailed ? ['date', 'type', 'sub_type', 'actor1', 'actor2'] : [],
-              limit: isDetailed ? 5000 : 20000,
+              limit,
             })
             features = collection.features
             void writeTile(key, features)
@@ -103,22 +164,25 @@ export function useTileEvents() {
 
           if (tileSession === session) {
             memory.set(key, features)
-            bumpVersion()
+            for (const f of features) byId.set(f.id, f) // incremental — no full rebuild
+            batchedBump()
           }
         } catch {
-          // network error or stale session — tile will be retried on next viewport change
+          // network error or stale session — will retry on next viewport change
         } finally {
+          release()
           inFlight.delete(key)
           if (--pending === 0) setIsFetching(false)
         }
       })()
     }
-  }, [bounds, zoom, filtersHash, isDetailed, dateRange, types])
+  }, [bounds, zoom, filtersHash, isDetailed, isWorld, dateRange, types, batchedBump])
 
-  const data = useMemo(() => {
-    const memory = isDetailed ? detailTiles : overviewTiles
-    return memory.size > 0 ? mergeFeatures(memory) : null
-    // version and isDetailed drive recomputation; memory refs are stable module-level Maps
+  const data = useMemo((): EventCollection | null => {
+    const byId = isDetailed ? detailById : overviewById
+    if (byId.size === 0) return null
+    // Spread is O(n) but only runs on batchedBump (≤ 1×/80ms), not on every tile arrival
+    return { type: 'FeatureCollection', features: [...byId.values()], is_truncated: false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [version, isDetailed])
 
