@@ -1,7 +1,7 @@
 import { SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 import { FiltersProvider } from '@/contexts/FiltersContext'
 import { MapProvider } from '@/contexts/MapContext'
-import { EventsLayer } from '@/features/Events'
+import { EventsLayer, LightEventsLayer } from '@/features/Events'
 import { Map, MapControls, Minimap } from '@/features/Map'
 import { TimeBrush } from '@/features/TimeBrush'
 import { useHasFinePointer } from '@/hooks/useHasFinePointer'
@@ -23,6 +23,7 @@ function App() {
           <main className="fixed inset-0">
             <Map>
               <EventsLayer />
+              <LightEventsLayer />
             </Map>
 
             <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-linear-to-b from-transparent to-black px-8 pb-12 before:absolute before:inset-0 before:mask-[linear-gradient(to_bottom,transparent,black)] before:backdrop-blur-xs">

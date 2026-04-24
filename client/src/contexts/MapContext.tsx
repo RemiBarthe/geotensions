@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components */
-import { LngLatBounds, Map as MapLibreMap } from 'maplibre-gl'
+import type { LngLatBounds, Map as MapLibreMap } from 'maplibre-gl'
 import {
   createContext,
   type PropsWithChildren,
