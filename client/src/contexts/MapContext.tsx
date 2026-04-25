@@ -45,20 +45,25 @@ function MapProvider({ children }: PropsWithChildren) {
 
     // Debounced sync during movement: starts tile fetching before the pan settles,
     // so data arrives by the time the user stops. Minimap has its own direct move listener.
-    let debounceTimer: ReturnType<typeof setTimeout>
-    const syncDebounced = () => {
-      clearTimeout(debounceTimer)
-      debounceTimer = setTimeout(sync, 100)
+    // Throttle (not debounce): fires every 150ms during movement so tiles start
+    // loading before the pan settles, rather than only after it stops.
+    let throttleTimer: ReturnType<typeof setTimeout> | null = null
+    const syncThrottled = () => {
+      if (throttleTimer) return
+      throttleTimer = setTimeout(() => {
+        throttleTimer = null
+        sync()
+      }, 150)
     }
 
     map.once('load', sync)
-    map.on('move', syncDebounced)
+    map.on('move', syncThrottled)
     map.on('moveend', sync)
 
     return () => {
-      map.off('move', syncDebounced)
+      map.off('move', syncThrottled)
       map.off('moveend', sync)
-      clearTimeout(debounceTimer)
+      if (throttleTimer) clearTimeout(throttleTimer)
     }
   }, [map])
 

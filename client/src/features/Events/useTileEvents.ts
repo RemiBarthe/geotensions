@@ -22,12 +22,15 @@ import {
 // ── Module-level state ────────────────────────────────────────────────────────
 // Persists within the tab session and survives React re-renders.
 
-// Tile data by tile key (used to check what's loaded and to clear on filter change)
+// Three bands: world (≤4), overview (5–10), detail (>10).
+// Kept separate so world-zoom and regional-zoom heatmaps don't bleed into each other —
+// overview tiles have 4× higher event density than world tiles and would saturate the
+// world heatmap if accumulated in the same map.
+const worldTiles = new Map<string, EventFeature[]>()
 const overviewTiles = new Map<string, EventFeature[]>()
 const detailTiles = new Map<string, EventFeature[]>()
 
-// Incrementally maintained dedup maps — avoids O(n × tiles) merge on every render.
-// Rebuilt from scratch only on filter change.
+const worldById = new Map<string, EventFeature>()
 const overviewById = new Map<string, EventFeature>()
 const detailById = new Map<string, EventFeature>()
 
@@ -103,8 +106,10 @@ export function useTileEvents() {
   // On filter change: clear all in-memory caches and invalidate in-flight callbacks
   useEffect(() => {
     if (prevFiltersHashRef.current !== null && prevFiltersHashRef.current !== filtersHash) {
+      worldTiles.clear()
       overviewTiles.clear()
       detailTiles.clear()
+      worldById.clear()
       overviewById.clear()
       detailById.clear()
       tileSession++
@@ -118,9 +123,9 @@ export function useTileEvents() {
   useEffect(() => {
     if (!bounds || zoom === null) return
 
-    const memory = isDetailed ? detailTiles : overviewTiles
-    const byId = isDetailed ? detailById : overviewById
-    const band = isDetailed ? 'detail' : 'overview'
+    const memory = isDetailed ? detailTiles : isWorld ? worldTiles : overviewTiles
+    const byId = isDetailed ? detailById : isWorld ? worldById : overviewById
+    const band = isDetailed ? 'detail' : isWorld ? 'world' : 'overview'
 
     // Tile parameters per zoom band
     const size = isDetailed ? DETAIL_TILE_SIZE : isWorld ? WORLD_TILE_SIZE : OVERVIEW_TILE_SIZE
@@ -179,7 +184,7 @@ export function useTileEvents() {
   }, [bounds, zoom, filtersHash, isDetailed, isWorld, dateRange, types, batchedBump])
 
   const data = useMemo((): EventCollection | null => {
-    const byId = isDetailed ? detailById : overviewById
+    const byId = isDetailed ? detailById : isWorld ? worldById : overviewById
     if (byId.size === 0) return null
     // Spread is O(n) but only runs on batchedBump (≤ 1×/80ms), not on every tile arrival
     return { type: 'FeatureCollection', features: [...byId.values()], is_truncated: false }
