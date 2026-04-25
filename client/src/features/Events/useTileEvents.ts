@@ -30,9 +30,9 @@ const worldTiles = new Map<string, EventFeature[]>()
 const overviewTiles = new Map<string, EventFeature[]>()
 const detailTiles = new Map<string, EventFeature[]>()
 
-const worldById = new Map<string, EventFeature>()
-const overviewById = new Map<string, EventFeature>()
-const detailById = new Map<string, EventFeature>()
+// Cap displayed events per viewport to prevent visual overload in dense areas.
+// Applied per tile so every geographic region contributes proportionally.
+const MAX_DISPLAY_EVENTS = 20_000
 
 // Fetch coordination
 const inFlight = new Set<string>()
@@ -83,6 +83,8 @@ export function useTileEvents() {
   const [version, bumpVersion] = useReducer((v) => v + 1, 0)
   const [isFetching, setIsFetching] = useState(false)
   const prevFiltersHashRef = useRef<string | null>(null)
+  const boundsRef = useRef(bounds)
+  boundsRef.current = bounds
 
   // Coalesce rapid tile arrivals (parallel fetches) into a single re-render per 80ms
   const batchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -109,9 +111,6 @@ export function useTileEvents() {
       worldTiles.clear()
       overviewTiles.clear()
       detailTiles.clear()
-      worldById.clear()
-      overviewById.clear()
-      detailById.clear()
       tileSession++
       setIsFetching(false)
       bumpVersion()
@@ -124,7 +123,6 @@ export function useTileEvents() {
     if (!bounds || zoom === null) return
 
     const memory = isDetailed ? detailTiles : isWorld ? worldTiles : overviewTiles
-    const byId = isDetailed ? detailById : isWorld ? worldById : overviewById
     const band = isDetailed ? 'detail' : isWorld ? 'world' : 'overview'
 
     // Tile parameters per zoom band
@@ -140,7 +138,10 @@ export function useTileEvents() {
       return !memory.has(key) && !inFlight.has(key)
     })
 
-    if (missing.length === 0) return
+    if (missing.length === 0) {
+      batchedBump() // viewport changed but all tiles cached — refresh display
+      return
+    }
 
     const session = tileSession
     let pending = missing.length
@@ -169,7 +170,6 @@ export function useTileEvents() {
 
           if (tileSession === session) {
             memory.set(key, features)
-            for (const f of features) byId.set(f.id, f) // incremental — no full rebuild
             batchedBump()
           }
         } catch {
@@ -184,12 +184,25 @@ export function useTileEvents() {
   }, [bounds, zoom, filtersHash, isDetailed, isWorld, dateRange, types, batchedBump])
 
   const data = useMemo((): EventCollection | null => {
-    const byId = isDetailed ? detailById : isWorld ? worldById : overviewById
-    if (byId.size === 0) return null
-    // Spread is O(n) but only runs on batchedBump (≤ 1×/80ms), not on every tile arrival
-    return { type: 'FeatureCollection', features: [...byId.values()], is_truncated: false }
+    const currentBounds = boundsRef.current
+    if (!currentBounds) return null
+
+    const memory = isDetailed ? detailTiles : isWorld ? worldTiles : overviewTiles
+    const band = isDetailed ? 'detail' : isWorld ? 'world' : 'overview'
+    const size = isDetailed ? DETAIL_TILE_SIZE : isWorld ? WORLD_TILE_SIZE : OVERVIEW_TILE_SIZE
+    const buffer = isWorld ? 0 : 1
+    const inView = bboxToTiles(normalizeBbox(currentBounds), size, buffer)
+
+    const perTileCap = Math.ceil(MAX_DISPLAY_EVENTS / Math.max(inView.length, 1))
+    const features: EventFeature[] = []
+    for (const { x, y } of inView) {
+      const tileFeatures = memory.get(makeTileKey(band, filtersHash, x, y))
+      if (tileFeatures) features.push(...tileFeatures.slice(0, perTileCap))
+    }
+
+    return features.length > 0 ? { type: 'FeatureCollection', features, is_truncated: false } : null
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [version, isDetailed])
+  }, [version, isDetailed, isWorld, filtersHash])
 
   return { data, isFetching }
 }
